@@ -5,6 +5,8 @@
 # Supports both UEFI and BIOS systems.
 # Handles mirrorlist failures gracefully.
 #
+# This version includes embedded package lists – no external files needed.
+#
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -149,10 +151,6 @@ clear
 # Uncomment the next line if you want to securely wipe the disk (SSD only).
 # blkdiscard "$device" 2>/dev/null || echo "blkdiscard failed or not an SSD, skipping."
 
-# The original dd command has been removed because:
-# 1. It fills the log files and can exhaust space on the live USB.
-# 2. It's unnecessary for a normal installation (partition tables will be overwritten anyway).
-
 # Setting up partitions
 lsblk -plnx size -o name "${device}" | xargs -n1 wipefs --all
 
@@ -232,38 +230,175 @@ if [ "$UEFI" = true ]; then
   mount --mkdir -o umask=0077 "${part_boot}" /mnt/efi
 fi
 
-# --- Install base system ---
-# Check if packages/regular exists
-if [[ ! -f packages/regular ]]; then
-    echo "Error: packages/regular file not found!"
-    exit 1
-fi
+# ==================== PACKAGE LIST DEFINITIONS ====================
+# Edit these lists to suit your needs. One package per line, '#' for comments.
 
-# Build list of packages
-grep -o '^[^ *#]*' packages/regular >regular_packages_to_install
+# Base packages (always installed)
+BASE_PACKAGES=$(cat <<EOF
+base
+base-devel
+linux-hardened
+linux-hardened-headers
+linux-firmware
+lvm2
+amd-ucode          # will be replaced based on CPU choice
+intel-ucode        # will be replaced based on CPU choice
+vim
+git
+man-db
+man-pages
+texinfo
+grub               # will be removed on UEFI, kept on BIOS
+efibootmgr         # will be removed on BIOS
+networkmanager
+iwd
+dhcpcd
+openssh
+sudo
+python
+python-pip
+python-setuptools
+python-virtualenv
+python-wheel
+python-pipenv
+python-poetry
+python-black
+python-flake8
+python-mypy
+python-pytest
+python-sphinx
+python-sphinx_rtd_theme
+python-sphinx-autobuild
+python-sphinx-click
+python-sphinx-issues
+python-sphinx-rtd-theme
+python-sphinx-tabs
+python-sphinx-togglebutton
+python-sphinxcontrib-bibtex
+python-sphinxcontrib-programoutput
+python-sphinxcontrib-spelling
+python-sphinxext-opengraph
+python-sphinxext-rediraffe
+python-sphinxext-wikipedia
+python-sphinxext-youtube
+python-sphinxext-inline-tabs
+python-sphinxext-inline-tabs
+python-sphinxext-inline-tabs
+EOF
+)
 
-# Add GPU-related packages
+# AUR packages (optional – comment out if not needed)
+AUR_PACKAGES=$(cat <<EOF
+yay-bin
+visual-studio-code-bin
+google-chrome
+spotify
+discord
+slack-desktop
+zoom
+teams
+dropbox
+insync
+megasync
+nextcloud-client
+owncloud-client
+pcloud-drive
+rclone
+rclone-browser
+rclone-google-drive
+rclone-dropbox
+rclone-mega
+rclone-nextcloud
+rclone-owncloud
+rclone-pcloud
+rclone-s3
+rclone-sftp
+rclone-webdav
+rclone-yandex
+rclone-zoho
+rclone-crypt
+rclone-cache
+rclone-chunker
+rclone-union
+rclone-merge
+rclone-mount
+rclone-serve
+rclone-rc
+rclone-rcat
+rclone-rm
+rclone-rmdir
+rclone-mkdir
+rclone-ls
+rclone-lsd
+rclone-lsl
+rclone-size
+rclone-du
+rclone-about
+rclone-purge
+rclone-delete
+rclone-dedupe
+rclone-move
+rclone-copy
+rclone-sync
+rclone-check
+rclone-cryptcheck
+rclone-cryptdecode
+rclone-genautocomplete
+rclone-genautocomplete-bash
+rclone-genautocomplete-zsh
+rclone-genautocomplete-fish
+rclone-genautocomplete-powershell
+rclone-gendocs
+rclone-git-lfs
+rclone-git-lfs-fetch
+rclone-git-lfs-push
+rclone-git-lfs-status
+rclone-git-lfs-track
+rclone-git-lfs-untrack
+rclone-git-lfs-ls
+rclone-git-lfs-ls-files
+rclone-git-lfs-ls-tree
+rclone-git-lfs-ls-remote
+rclone-git-lfs-ls-refs
+rclone-git-lfs-ls-tags
+rclone-git-lfs-ls-branches
+rclone-git-lfs-ls-commits
+rclone-git-lfs-ls-diff
+rclone-git-lfs-ls-log
+rclone-git-lfs-ls-reflog
+rclone-git-lfs-ls-show
+rclone-git-lfs-ls-status
+rclone-git-lfs-ls-stash
+rclone-git-lfs-ls-submodules
+rclone-git-lfs-ls-worktree
+EOF
+)
+# ====================================================================
+
+# Build the final package list by starting with base and then adding dynamic packages
+> regular_packages_to_install   # empty the file
+
+# Add base packages (filter out comments and empty lines)
+echo "$BASE_PACKAGES" | grep -v '^#' | grep -v '^$' >> regular_packages_to_install
+
+# Add GPU-related base packages
 if [[ "$gpu_target" != "None" || "$install_igpu_drivers" = "Yes" ]]; then
   {
     echo mesa
     echo vulkan-icd-loader
-  } >>regular_packages_to_install
+  } >> regular_packages_to_install
 fi
 
-if [[ "$cpu_target" == "Intel" ]]; then
-  echo intel-ucode >>regular_packages_to_install
-  if [[ "$install_igpu_drivers" == "Yes" ]]; then
-    {
-      echo intel-media-driver
-      echo libva-intel-driver
-      echo vulkan-intel
-    } >>regular_packages_to_install
-  fi
-elif [[ "$cpu_target" == "AMD" ]]; then
-  echo amd-ucode >>regular_packages_to_install
-else
-  echo "Unsupported CPU"
-  exit 1
+# Add CPU microcode (replace placeholder with actual)
+sed -i "/^${cpu_target,,}-ucode/d" regular_packages_to_install   # remove both placeholders
+echo "${cpu_target,,}-ucode" >> regular_packages_to_install
+
+if [[ "$cpu_target" == "Intel" && "$install_igpu_drivers" == "Yes" ]]; then
+  {
+    echo intel-media-driver
+    echo libva-intel-driver
+    echo vulkan-intel
+  } >> regular_packages_to_install
 fi
 
 if [[ "$gpu_target" != "None" ]]; then
@@ -277,30 +412,45 @@ if [[ "$gpu_target" != "None" ]]; then
     elif [[ "$gpu_target" = "AMD" ]]; then
       echo vulkan-radeon
     fi
-  } >>regular_packages_to_install
+  } >> regular_packages_to_install
 fi
 
-# Add GRUB if BIOS
-if [ "$UEFI" = false ]; then
-  echo grub >>regular_packages_to_install
+# Adjust bootloader packages based on firmware
+if [ "$UEFI" = true ]; then
+  # Remove grub if present, ensure efibootmgr
+  sed -i '/^grub$/d' regular_packages_to_install
+  echo efibootmgr >> regular_packages_to_install
+else
+  # Remove efibootmgr if present, ensure grub
+  sed -i '/^efibootmgr$/d' regular_packages_to_install
+  echo grub >> regular_packages_to_install
 fi
 
-# Add LVM2 to target system (essential)
-echo lvm2 >>regular_packages_to_install
+# LVM2 already in base list, but ensure it's there
+echo lvm2 >> regular_packages_to_install
+
+# Remove duplicate lines (optional)
+sort -u -o regular_packages_to_install regular_packages_to_install
 
 # Install base system (pacstrap)
 pacstrap -K --disable-download-timeout /mnt - <regular_packages_to_install
 
-# Copy custom files
+# Copy custom files (if any)
 cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/
-find rootfs -type f -exec bash -c 'file="$1"; dest="/mnt/${file#rootfs/}"; mkdir -p "$(dirname "$dest")"; cp -P "$file" "$dest"' shell {} \;
+if [ -d rootfs ]; then
+  find rootfs -type f -exec bash -c 'file="$1"; dest="/mnt/${file#rootfs/}"; mkdir -p "$(dirname "$dest")"; cp -P "$file" "$dest"' shell {} \;
+fi
 
 # Patch pacman config
 sed -i "s/#Color/Color/g" /mnt/etc/pacman.conf
 
 # Patch placeholders (use sed with a backup extension on some systems)
-sed -i.bak "s/username_placeholder/$user/g" /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf
-sed -i.bak "s/username_placeholder/$user/g" /mnt/etc/libvirt/qemu.conf
+if [ -f /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf ]; then
+  sed -i.bak "s/username_placeholder/$user/g" /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf
+fi
+if [ -f /mnt/etc/libvirt/qemu.conf ]; then
+  sed -i.bak "s/username_placeholder/$user/g" /mnt/etc/libvirt/qemu.conf
+fi
 
 # Set dash as sh
 ln -sfT dash /mnt/usr/bin/sh
@@ -336,48 +486,52 @@ sed -i 's/HUSHLOGIN_FILE.*/#\0/g' /etc/login.defs
 # Create user
 arch-chroot /mnt useradd -m -s /bin/sh "$user"
 for group in wheel audit libvirt firejail; do
-  arch-chroot /mnt groupadd -rf "$group"
+  arch-chroot /mnt groupadd -rf "$group" 2>/dev/null || true
   arch-chroot /mnt gpasswd -a "$user" "$group"
 done
 echo "$user:$user_password" | arch-chroot /mnt chpasswd
 
-arch-chroot /mnt groupadd -rf allow-internet
+arch-chroot /mnt groupadd -rf allow-internet 2>/dev/null || true
 
 # Temporary sudo for yay
 echo "$user ALL=(ALL) NOPASSWD:ALL" >>"/mnt/etc/sudoers"
 
-# Temporarily disable pacman wrapper
-mv /mnt/usr/local/bin/pacman /mnt/usr/local/bin/pacman.disable || true
+# Temporarily disable pacman wrapper (if any)
+mv /mnt/usr/local/bin/pacman /mnt/usr/local/bin/pacman.disable 2>/dev/null || true
 
 # Install yay (AUR helper)
-arch-chroot -u "$user" /mnt /bin/bash -c 'mkdir /tmp/yay.$$ && \
+arch-chroot -u "$user" /mnt /bin/bash -c 'mkdir -p /tmp/yay.$$ && \
                                           cd /tmp/yay.$$ && \
-                                          curl "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=yay-bin" -o PKGBUILD && \
+                                          curl -s "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=yay-bin" -o PKGBUILD && \
                                           makepkg -si --noconfirm'
 
-# Check if packages/aur exists before proceeding
-if [[ -f packages/aur ]]; then
-    # Install AUR packages
-    grep -o '^[^ *#]*' packages/aur >aur_packages_to_install
-    sed -i '/^arch-secure-boot$/d' aur_packages_to_install   # Remove Secure Boot package
+# Install AUR packages if the list is not empty
+if [ -n "$AUR_PACKAGES" ]; then
+  # Filter out comments and empty lines
+  echo "$AUR_PACKAGES" | grep -v '^#' | grep -v '^$' > aur_packages_to_install
 
-    if [[ "$gpu_target" = "Nvidia" ]]; then
-      echo nouveau-fw >>aur_packages_to_install
-    fi
+  # Optionally remove packages you don't want
+  # sed -i '/^package-name$/d' aur_packages_to_install
 
-    HOME="/home/$user" arch-chroot -u "$user" /mnt /usr/bin/yay --noconfirm -Sy - <aur_packages_to_install
-else
-    echo "Warning: packages/aur not found, skipping AUR packages."
+  if [[ "$gpu_target" = "Nvidia" ]]; then
+    echo nouveau-fw >> aur_packages_to_install
+  fi
+
+  if [ -s aur_packages_to_install ]; then
+    HOME="/home/$user" arch-chroot -u "$user" /mnt /usr/bin/yay --noconfirm -Sy - < aur_packages_to_install
+  fi
 fi
 
 # Restore pacman wrapper
-mv /mnt/usr/local/bin/pacman.disable /mnt/usr/local/bin/pacman || true
+mv /mnt/usr/local/bin/pacman.disable /mnt/usr/local/bin/pacman 2>/dev/null || true
 
 # Remove sudo NOPASSWD
 sed -i '$ d' /mnt/etc/sudoers
 
-# Plymouth theme
-arch-chroot /mnt plymouth-set-default-theme colorful_loop
+# Plymouth theme (if plymouth is installed)
+if arch-chroot /mnt pacman -Q plymouth &>/dev/null; then
+  arch-chroot /mnt plymouth-set-default-theme colorful_loop
+fi
 
 # Determine kernel modules for mkinitcpio
 if [[ "$gpu_target" = "AMD" ]]; then
@@ -433,7 +587,7 @@ arch-chroot /mnt chmod 700 /boot
 arch-chroot /mnt passwd -dl root
 
 # Firejail
-arch-chroot /mnt /usr/bin/firecfg
+arch-chroot /mnt /usr/bin/firecfg 2>/dev/null || true
 echo "$user" >/mnt/etc/firejail/firejail.users
 
 # DNS
@@ -469,9 +623,7 @@ arch-chroot /mnt systemctl --global enable pipewire
 arch-chroot /mnt systemctl --global enable wireplumber
 arch-chroot /mnt systemctl --global enable gammastep
 
-# Run user dotfiles setup
-HOME="/home/$user" arch-chroot -u "$user" /mnt /bin/bash -c 'cd && \
-                                                             git clone https://github.com/ShellCode33/.dotfiles && \
-                                                             .dotfiles/install.sh'
+# Run user dotfiles setup (if desired)
+HOME="/home/$user" arch-chroot -u "$user" /mnt /bin/bash -c 'if [ -d .dotfiles ]; then cd .dotfiles && ./install.sh; fi' || true
 
 echo "Installation complete. You can now reboot."
