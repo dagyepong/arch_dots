@@ -6,6 +6,7 @@
 # Handles mirrorlist failures gracefully.
 #
 # This version includes embedded package lists – no external files needed.
+# Docker has been completely removed.
 #
 
 set -euo pipefail
@@ -182,22 +183,21 @@ fi
 echo -n "$luks_password" | cryptsetup luksFormat --label archlinux "${part_root}"
 echo -n "$luks_password" | cryptsetup luksOpen "${part_root}" archlinux
 
-# --- LVM setup (replaces Btrfs subvolumes) ---
+# --- LVM setup ---
 pvcreate /dev/mapper/archlinux
 vgcreate vg0 /dev/mapper/archlinux
 
 # Create logical volumes (adjust sizes to your needs and available disk space)
-# These are examples; modify according to your requirements.
+# Docker LV has been removed.
 lvcreate -L 20G vg0 -n root
 lvcreate -L 10G vg0 -n home
 lvcreate -L 4G vg0 -n swap
 lvcreate -L 10G vg0 -n var
 lvcreate -L 2G vg0 -n var_log
 lvcreate -L 5G vg0 -n var_lib_libvirt
-lvcreate -L 10G vg0 -n var_lib_docker
+# The space that was used for Docker can be reallocated to other LVs if desired.
 lvcreate -L 10G vg0 -n var_cache_pacman_pkg
 lvcreate -L 2G vg0 -n var_tmp
-# (If you need more LVs, add them here)
 
 # Format each LV as XFS (except swap)
 mkfs.xfs -f /dev/vg0/root
@@ -205,7 +205,6 @@ mkfs.xfs -f /dev/vg0/home
 mkfs.xfs -f /dev/vg0/var
 mkfs.xfs -f /dev/vg0/var_log
 mkfs.xfs -f /dev/vg0/var_lib_libvirt
-mkfs.xfs -f /dev/vg0/var_lib_docker
 mkfs.xfs -f /dev/vg0/var_cache_pacman_pkg
 mkfs.xfs -f /dev/vg0/var_tmp
 
@@ -221,7 +220,6 @@ mount --mkdir /dev/vg0/home /mnt/home
 mount --mkdir /dev/vg0/var /mnt/var
 mount --mkdir /dev/vg0/var_log /mnt/var/log
 mount --mkdir /dev/vg0/var_lib_libvirt /mnt/var/lib/libvirt
-mount --mkdir /dev/vg0/var_lib_docker /mnt/var/lib/docker
 mount --mkdir /dev/vg0/var_cache_pacman_pkg /mnt/var/cache/pacman/pkg
 mount --mkdir /dev/vg0/var_tmp /mnt/var/tmp
 
@@ -281,8 +279,6 @@ python-sphinxext-opengraph
 python-sphinxext-rediraffe
 python-sphinxext-wikipedia
 python-sphinxext-youtube
-python-sphinxext-inline-tabs
-python-sphinxext-inline-tabs
 python-sphinxext-inline-tabs
 EOF
 )
@@ -594,7 +590,7 @@ echo "$user" >/mnt/etc/firejail/firejail.users
 rm -f /mnt/etc/resolv.conf
 arch-chroot /mnt ln -s /usr/lib/systemd/resolv.conf /etc/resolv.conf
 
-# Enable system services
+# Enable system services (docker has been removed)
 arch-chroot /mnt systemctl enable systemd-networkd
 arch-chroot /mnt systemctl enable systemd-resolved
 arch-chroot /mnt systemctl enable systemd-timesyncd
@@ -603,7 +599,6 @@ arch-chroot /mnt systemctl enable dbus-broker
 arch-chroot /mnt systemctl enable iwd
 arch-chroot /mnt systemctl enable auditd
 arch-chroot /mnt systemctl enable nftables
-arch-chroot /mnt systemctl enable docker
 arch-chroot /mnt systemctl enable libvirtd
 arch-chroot /mnt systemctl enable apparmor
 arch-chroot /mnt systemctl enable auditd-notify
