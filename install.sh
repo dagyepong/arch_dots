@@ -451,5 +451,5 @@ arch-chroot /mnt systemctl --global enable gammastep
 
 # Run userspace configuration
 HOME="/home/$user" arch-chroot -u "$user" /mnt /bin/bash -c 'cd && \
-                                                             git clone https://github.com/ShellCode33/.dotfiles && \
-                                                             .dotfiles/install.sh'
+                                                             git clone https://github.com/dagyepong/arch_dots.git && \
+                                                             .install.sh'
