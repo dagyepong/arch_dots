@@ -8,6 +8,7 @@
 # This version includes embedded package lists – no external files needed.
 # Docker has been completely removed.
 # The last LV (var_tmp) uses all remaining free space.
+# Compatible with older ISOs (no -K flag).
 #
 
 set -euo pipefail
@@ -435,8 +436,8 @@ if [ ! -s regular_packages_to_install ]; then
     exit 1
 fi
 
-# Install base system (pacstrap)
-pacstrap -K --disable-download-timeout /mnt - <regular_packages_to_install
+# Install base system (pacstrap) – note: -K removed for compatibility
+pacstrap --disable-download-timeout /mnt - <regular_packages_to_install
 
 # Copy custom files (if any)
 cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/
