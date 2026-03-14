@@ -10,9 +10,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 trap on_error ERR
 
-# Redirect outputs to files for easier debugging
-exec 1> >(tee "stdout.log")
-exec 2> >(tee "stderr.log" >&2)
+# Redirect outputs to /tmp to avoid filling the USB stick
+exec 1> >(tee /tmp/stdout.log)
+exec 2> >(tee /tmp/stderr.log >&2)
 
 # Dialog
 BACKTITLE="ArchLinux Hardened Installation"
@@ -145,8 +145,16 @@ fi
 clear
 # ====================================================================
 
-echo "Writing random bytes to $device, go grab some coffee it might take a while"
-dd bs=1M if=/dev/urandom of="$device" status=progress || true
+# OPTIONAL: If you are using an SSD, you can quickly discard all blocks (instant secure wipe).
+# Uncomment the next line if you want to securely wipe the disk (SSD only).
+# blkdiscard "$device" 2>/dev/null || echo "blkdiscard failed or not an SSD, skipping."
+
+# The original dd command has been removed because:
+# 1. It fills the log files and can exhaust space on the live USB.
+# 2. It's unnecessary for a normal installation (partition tables will be overwritten anyway).
+# If you really need to overwrite the entire disk for security reasons,
+# consider using 'blkdiscard' on SSDs or 'dd' redirected to /dev/null and to the terminal directly.
+# For HDDs, you could add a 'dd' line with output to /dev/tty, but it's still very slow.
 
 # Setting up partitions
 lsblk -plnx size -o name "${device}" | xargs -n1 wipefs --all
@@ -287,9 +295,9 @@ find rootfs -type f -exec bash -c 'file="$1"; dest="/mnt/${file#rootfs/}"; mkdir
 # Patch pacman config
 sed -i "s/#Color/Color/g" /mnt/etc/pacman.conf
 
-# Patch placeholders
-sed -i "s/username_placeholder/$user/g" /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf
-sed -i "s/username_placeholder/$user/g" /mnt/etc/libvirt/qemu.conf
+# Patch placeholders (use sed with a backup extension on some systems)
+sed -i.bak "s/username_placeholder/$user/g" /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf
+sed -i.bak "s/username_placeholder/$user/g" /mnt/etc/libvirt/qemu.conf
 
 # Set dash as sh
 ln -sfT dash /mnt/usr/bin/sh
@@ -441,12 +449,10 @@ arch-chroot /mnt systemctl enable local-forwarding-proxy
 
 # Enable timers (snapper timers are disabled because snapper requires Btrfs)
 arch-chroot /mnt systemctl enable auditor.timer
-arch-chroot /mnt systemctl enable btrfs-scrub@-.timer   # Note: btrfs-scrub won't work with XFS; you may remove this line.
-arch-chroot /mnt systemctl enable btrfs-balance.timer   # Same here – remove if not needed.
 arch-chroot /mnt systemctl enable pacman-sync.timer
 arch-chroot /mnt systemctl enable pacman-notify.timer
 arch-chroot /mnt systemctl enable should-reboot-check.timer
-# (The two btrfs timers are kept only as examples; you might want to delete them or replace with something else.)
+# Note: btrfs-related timers (btrfs-scrub, btrfs-balance) have been removed because they are not compatible with XFS.
 
 # Enable user services
 arch-chroot /mnt systemctl --global enable dbus-broker
