@@ -3,6 +3,7 @@
 #
 # ArchLinux Hardened installation script.
 # Supports both UEFI and BIOS systems.
+# Handles mirrorlist failures gracefully.
 #
 
 set -euo pipefail
@@ -124,9 +125,24 @@ luks_password=$(get_password "LUKS" "Enter password") || exit 1
 clear
 test -z "$luks_password" && echo >&2 "LUKS password cannot be empty" && exit 1
 
-echo "Setting up fastest mirrors..."
-reflector --country France,Germany --latest 30 --sort rate --save /etc/pacman.d/mirrorlist
+# ==================== MIRRORLIST SETUP (robust) ====================
+# Add a set of very reliable fallback mirrors FIRST
+cat > /etc/pacman.d/mirrorlist << EOF
+## Fallback mirrors - added on $(date)
+Server = https://mirrors.kernel.org/archlinux/\$repo/os/\$arch
+Server = https://mirror.rackspace.com/archlinux/\$repo/os/\$arch
+Server = https://mirror.leaseweb.net/archlinux/\$repo/os/\$arch
+EOF
+
+# Attempt to update with reflector, but do not exit on failure
+echo "Attempting to optimize mirrorlist with reflector (this may fail)..."
+if reflector --country France,Germany --latest 30 --sort rate --append /etc/pacman.d/mirrorlist 2>/dev/null; then
+    echo "Mirrorlist updated successfully with reflector."
+else
+    echo "Reflector failed. Continuing with fallback mirrors."
+fi
 clear
+# ====================================================================
 
 echo "Writing random bytes to $device, go grab some coffee it might take a while"
 dd bs=1M if=/dev/urandom of="$device" status=progress || true
@@ -250,7 +266,8 @@ if [ "$UEFI" = false ]; then
   echo grub >>regular_packages_to_install
 fi
 
-pacstrap -K /mnt - <regular_packages_to_install
+# Install base system with timeout resilience
+pacstrap -K --disable-download-timeout /mnt - <regular_packages_to_install
 
 # Copy custom files
 cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/
