@@ -7,6 +7,7 @@
 #
 # This version includes embedded package lists – no external files needed.
 # Docker has been completely removed.
+# The last LV (var_tmp) uses all remaining free space.
 #
 
 set -euo pipefail
@@ -187,17 +188,17 @@ echo -n "$luks_password" | cryptsetup luksOpen "${part_root}" archlinux
 pvcreate /dev/mapper/archlinux
 vgcreate vg0 /dev/mapper/archlinux
 
-# Create logical volumes (adjust sizes to your needs and available disk space)
-# Docker LV has been removed.
+# Create logical volumes – adjust the sizes to your needs.
+# The last LV (var_tmp) will use ALL remaining free space.
 lvcreate -L 20G vg0 -n root
 lvcreate -L 10G vg0 -n home
 lvcreate -L 4G vg0 -n swap
 lvcreate -L 10G vg0 -n var
 lvcreate -L 2G vg0 -n var_log
 lvcreate -L 5G vg0 -n var_lib_libvirt
-# The space that was used for Docker can be reallocated to other LVs if desired.
 lvcreate -L 10G vg0 -n var_cache_pacman_pkg
-lvcreate -L 2G vg0 -n var_tmp
+# Use all remaining space for var_tmp
+lvcreate -l 100%FREE vg0 -n var_tmp
 
 # Format each LV as XFS (except swap)
 mkfs.xfs -f /dev/vg0/root
@@ -427,6 +428,12 @@ echo lvm2 >> regular_packages_to_install
 
 # Remove duplicate lines (optional)
 sort -u -o regular_packages_to_install regular_packages_to_install
+
+# Check that the package list is not empty
+if [ ! -s regular_packages_to_install ]; then
+    echo "Error: package list is empty. Aborting."
+    exit 1
+fi
 
 # Install base system (pacstrap)
 pacstrap -K --disable-download-timeout /mnt - <regular_packages_to_install
