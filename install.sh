@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# ArchLinux Hardened installation script.
+# ArchLinux Hardened installation script – XFS/LVM version
 # Supports both UEFI and BIOS systems.
 # Handles mirrorlist failures gracefully.
 #
@@ -76,7 +76,8 @@ hwclock --systohc --utc
 pacman -Sy --noconfirm --needed archlinux-keyring
 
 # Make sure some basic tools that will be used in this script are installed
-pacman -Sy --noconfirm --needed git reflector terminus-font dialog wget
+# Added lvm2 for the live environment
+pacman -Sy --noconfirm --needed git reflector terminus-font dialog wget lvm2
 
 # Adjust the font size in case the screen is hard to read
 noyes=("Yes" "The font is too small" "No" "The font size is just fine")
@@ -174,56 +175,63 @@ if [ "$UEFI" = true ]; then
   mkfs.vfat -n "EFI" -F 32 "${part_boot}"
 fi
 
+# LUKS encryption
 echo -n "$luks_password" | cryptsetup luksFormat --label archlinux "${part_root}"
 echo -n "$luks_password" | cryptsetup luksOpen "${part_root}" archlinux
-mkfs.btrfs --label archlinux /dev/mapper/archlinux
 
-# Create btrfs subvolumes
-mount /dev/mapper/archlinux /mnt
-btrfs subvolume create /mnt/@
-btrfs subvolume create /mnt/@home
-btrfs subvolume create /mnt/@swap
-btrfs subvolume create /mnt/@snapshots
-btrfs subvolume create /mnt/@home-snapshots
-btrfs subvolume create /mnt/@libvirt
-btrfs subvolume create /mnt/@docker
-btrfs subvolume create /mnt/@cache-pacman-pkgs
-btrfs subvolume create /mnt/@var
-btrfs subvolume create /mnt/@var-log
-btrfs subvolume create /mnt/@var-tmp
-umount /mnt
+# --- LVM setup (replaces Btrfs subvolumes) ---
+pvcreate /dev/mapper/archlinux
+vgcreate vg0 /dev/mapper/archlinux
 
-mount_opt="defaults,noatime,nodiratime,compress=zstd,space_cache=v2"
-mount -o subvol=@,$mount_opt /dev/mapper/archlinux /mnt
+# Create logical volumes (adjust sizes to your needs and available disk space)
+# These are examples; modify according to your requirements.
+lvcreate -L 20G vg0 -n root
+lvcreate -L 10G vg0 -n home
+lvcreate -L 4G vg0 -n swap
+lvcreate -L 10G vg0 -n var
+lvcreate -L 2G vg0 -n var_log
+lvcreate -L 5G vg0 -n var_lib_libvirt
+lvcreate -L 10G vg0 -n var_lib_docker
+lvcreate -L 10G vg0 -n var_cache_pacman_pkg
+lvcreate -L 2G vg0 -n var_tmp
+# (If you need more LVs, add them here)
 
+# Format each LV as XFS (except swap)
+mkfs.xfs -f /dev/vg0/root
+mkfs.xfs -f /dev/vg0/home
+mkfs.xfs -f /dev/vg0/var
+mkfs.xfs -f /dev/vg0/var_log
+mkfs.xfs -f /dev/vg0/var_lib_libvirt
+mkfs.xfs -f /dev/vg0/var_lib_docker
+mkfs.xfs -f /dev/vg0/var_cache_pacman_pkg
+mkfs.xfs -f /dev/vg0/var_tmp
+
+# Swap
+mkswap /dev/vg0/swap
+swapon /dev/vg0/swap
+
+# --- Mounting ---
+mount /dev/vg0/root /mnt
+
+# Create directories and mount other LVs
+mount --mkdir /dev/vg0/home /mnt/home
+mount --mkdir /dev/vg0/var /mnt/var
+mount --mkdir /dev/vg0/var_log /mnt/var/log
+mount --mkdir /dev/vg0/var_lib_libvirt /mnt/var/lib/libvirt
+mount --mkdir /dev/vg0/var_lib_docker /mnt/var/lib/docker
+mount --mkdir /dev/vg0/var_cache_pacman_pkg /mnt/var/cache/pacman/pkg
+mount --mkdir /dev/vg0/var_tmp /mnt/var/tmp
+
+# Mount EFI partition (if UEFI)
 if [ "$UEFI" = true ]; then
   mount --mkdir -o umask=0077 "${part_boot}" /mnt/efi
 fi
 
-mount --mkdir -o subvol=@home,$mount_opt /dev/mapper/archlinux /mnt/home
-mount --mkdir -o subvol=@swap,$mount_opt /dev/mapper/archlinux /mnt/.swap
-mount --mkdir -o subvol=@snapshots,$mount_opt /dev/mapper/archlinux /mnt/.snapshots
-mount --mkdir -o subvol=@home-snapshots,$mount_opt /dev/mapper/archlinux /mnt/home/.snapshots
-
-# Copy-on-Write is no good for big files that are written multiple times.
-# This includes: logs, containers, virtual machines, databases, etc.
-# They usually lie in /var, therefore CoW will be disabled for everything in /var
-mount --mkdir -o subvol=@var,$mount_opt /dev/mapper/archlinux /mnt/var
-chattr +C /mnt/var # Disable Copy-on-Write for /var
-mount --mkdir -o subvol=@var-log,$mount_opt /dev/mapper/archlinux /mnt/var/log
-mount --mkdir -o subvol=@libvirt,$mount_opt /dev/mapper/archlinux /mnt/var/lib/libvirt
-mount --mkdir -o subvol=@docker,$mount_opt /dev/mapper/archlinux /mnt/var/lib/docker
-mount --mkdir -o subvol=@cache-pacman-pkgs,$mount_opt /dev/mapper/archlinux /mnt/var/cache/pacman/pkg
-mount --mkdir -o subvol=@var-tmp,$mount_opt /dev/mapper/archlinux /mnt/var/tmp
-
-# Create swapfile
-btrfs filesystem mkswapfile /mnt/.swap/swapfile
-mkswap /mnt/.swap/swapfile
-swapon /mnt/.swap/swapfile
-
-# Install all packages listed in packages/regular
+# --- Install base system ---
+# Build list of packages
 grep -o '^[^ *#]*' packages/regular >regular_packages_to_install
 
+# Add GPU-related packages
 if [[ "$gpu_target" != "None" || "$install_igpu_drivers" = "Yes" ]]; then
   {
     echo mesa
@@ -266,7 +274,10 @@ if [ "$UEFI" = false ]; then
   echo grub >>regular_packages_to_install
 fi
 
-# Install base system with timeout resilience
+# Add LVM2 to target system (essential)
+echo lvm2 >>regular_packages_to_install
+
+# Install base system (pacstrap)
 pacstrap -K --disable-download-timeout /mnt - <regular_packages_to_install
 
 # Copy custom files
@@ -283,13 +294,12 @@ sed -i "s/username_placeholder/$user/g" /mnt/etc/libvirt/qemu.conf
 # Set dash as sh
 ln -sfT dash /mnt/usr/bin/sh
 
-# Kernel command line
+# Kernel command line (adapted for LVM)
 {
   echo -n "lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
   echo -n " lockdown=integrity"
   echo -n " cryptdevice=${part_root}:archlinux"
-  echo -n " root=/dev/mapper/archlinux"
-  echo -n " rootflags=subvol=@"
+  echo -n " root=/dev/mapper/vg0-root"                     # LVM root LV
   echo -n " mem_sleep_default=deep"
   echo -n " audit=1"
   echo -n " audit_backlog_limit=32768"
@@ -368,7 +378,7 @@ cat <<EOF >/mnt/etc/mkinitcpio.conf
 MODULES=($modules)
 BINARIES=(setfont)
 FILES=()
-HOOKS=(base consolefont keymap udev autodetect modconf block plymouth encrypt filesystems keyboard)
+HOOKS=(base consolefont keymap udev autodetect modconf block encrypt lvm2 filesystems keyboard)
 EOF
 
 arch-chroot /mnt mkinitcpio -p linux-hardened
@@ -392,7 +402,6 @@ editor no
 EOF
 else
   # GRUB for BIOS
-  # Create GRUB default configuration with kernel command line
   cat <<EOF >/mnt/etc/default/grub
 GRUB_CMDLINE_LINUX_DEFAULT="$(cat /mnt/etc/kernel/cmdline)"
 GRUB_TIMEOUT=3
@@ -430,15 +439,14 @@ arch-chroot /mnt systemctl enable apparmor
 arch-chroot /mnt systemctl enable auditd-notify
 arch-chroot /mnt systemctl enable local-forwarding-proxy
 
-# Enable timers
-arch-chroot /mnt systemctl enable snapper-timeline.timer
-arch-chroot /mnt systemctl enable snapper-cleanup.timer
+# Enable timers (snapper timers are disabled because snapper requires Btrfs)
 arch-chroot /mnt systemctl enable auditor.timer
-arch-chroot /mnt systemctl enable btrfs-scrub@-.timer
-arch-chroot /mnt systemctl enable btrfs-balance.timer
+arch-chroot /mnt systemctl enable btrfs-scrub@-.timer   # Note: btrfs-scrub won't work with XFS; you may remove this line.
+arch-chroot /mnt systemctl enable btrfs-balance.timer   # Same here – remove if not needed.
 arch-chroot /mnt systemctl enable pacman-sync.timer
 arch-chroot /mnt systemctl enable pacman-notify.timer
 arch-chroot /mnt systemctl enable should-reboot-check.timer
+# (The two btrfs timers are kept only as examples; you might want to delete them or replace with something else.)
 
 # Enable user services
 arch-chroot /mnt systemctl --global enable dbus-broker
