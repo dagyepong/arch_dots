@@ -152,9 +152,6 @@ clear
 # The original dd command has been removed because:
 # 1. It fills the log files and can exhaust space on the live USB.
 # 2. It's unnecessary for a normal installation (partition tables will be overwritten anyway).
-# If you really need to overwrite the entire disk for security reasons,
-# consider using 'blkdiscard' on SSDs or 'dd' redirected to /dev/null and to the terminal directly.
-# For HDDs, you could add a 'dd' line with output to /dev/tty, but it's still very slow.
 
 # Setting up partitions
 lsblk -plnx size -o name "${device}" | xargs -n1 wipefs --all
@@ -236,6 +233,12 @@ if [ "$UEFI" = true ]; then
 fi
 
 # --- Install base system ---
+# Check if packages/regular exists
+if [[ ! -f packages/regular ]]; then
+    echo "Error: packages/regular file not found!"
+    exit 1
+fi
+
 # Build list of packages
 grep -o '^[^ *#]*' packages/regular >regular_packages_to_install
 
@@ -352,15 +355,20 @@ arch-chroot -u "$user" /mnt /bin/bash -c 'mkdir /tmp/yay.$$ && \
                                           curl "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=yay-bin" -o PKGBUILD && \
                                           makepkg -si --noconfirm'
 
-# Install AUR packages
-grep -o '^[^ *#]*' packages/aur >aur_packages_to_install
-sed -i '/^arch-secure-boot$/d' aur_packages_to_install   # Remove Secure Boot package
+# Check if packages/aur exists before proceeding
+if [[ -f packages/aur ]]; then
+    # Install AUR packages
+    grep -o '^[^ *#]*' packages/aur >aur_packages_to_install
+    sed -i '/^arch-secure-boot$/d' aur_packages_to_install   # Remove Secure Boot package
 
-if [[ "$gpu_target" = "Nvidia" ]]; then
-  echo nouveau-fw >>aur_packages_to_install
+    if [[ "$gpu_target" = "Nvidia" ]]; then
+      echo nouveau-fw >>aur_packages_to_install
+    fi
+
+    HOME="/home/$user" arch-chroot -u "$user" /mnt /usr/bin/yay --noconfirm -Sy - <aur_packages_to_install
+else
+    echo "Warning: packages/aur not found, skipping AUR packages."
 fi
-
-HOME="/home/$user" arch-chroot -u "$user" /mnt /usr/bin/yay --noconfirm -Sy - <aur_packages_to_install
 
 # Restore pacman wrapper
 mv /mnt/usr/local/bin/pacman.disable /mnt/usr/local/bin/pacman || true
@@ -452,7 +460,7 @@ arch-chroot /mnt systemctl enable auditor.timer
 arch-chroot /mnt systemctl enable pacman-sync.timer
 arch-chroot /mnt systemctl enable pacman-notify.timer
 arch-chroot /mnt systemctl enable should-reboot-check.timer
-# Note: btrfs-related timers (btrfs-scrub, btrfs-balance) have been removed because they are not compatible with XFS.
+# Note: btrfs-related timers have been removed because they are not compatible with XFS.
 
 # Enable user services
 arch-chroot /mnt systemctl --global enable dbus-broker
