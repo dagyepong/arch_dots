@@ -2,8 +2,7 @@
 
 #
 # ArchLinux Hardened installation script.
-#
-# Heavily inspired by https://github.com/maximbaz/dotfiles/blob/master/install.sh
+# Supports both UEFI and BIOS systems.
 #
 
 set -euo pipefail
@@ -54,9 +53,13 @@ get_choice() {
   dialog --clear --stdout --backtitle "$BACKTITLE" --title "$title" --menu "$description" 0 0 0 "${options[@]}"
 }
 
-if [ ! -d /sys/firmware/efi ]; then
-  echo >&2 "legacy BIOS boot detected, this install script only works with UEFI."
-  exit 1
+# Detect boot mode
+if [ -d /sys/firmware/efi ]; then
+  UEFI=true
+  echo "UEFI mode detected."
+else
+  UEFI=false
+  echo "BIOS/Legacy mode detected."
 fi
 
 # Unmount previously mounted devices in case the install script is run multiple times
@@ -130,16 +133,31 @@ dd bs=1M if=/dev/urandom of="$device" status=progress || true
 
 # Setting up partitions
 lsblk -plnx size -o name "${device}" | xargs -n1 wipefs --all
-sgdisk --clear "${device}" --new 1::-551MiB "${device}" --new 2::0 --typecode 2:ef00 "${device}"
-sgdisk --change-name=1:primary --change-name=2:ESP "${device}"
 
-# shellcheck disable=SC2086,SC2010
-{
+if [ "$UEFI" = true ]; then
+  # UEFI: GPT with root (minus 551MiB) and EFI partition
+  sgdisk --clear "${device}" --new 1::-551MiB "${device}" --new 2::0 --typecode 2:ef00 "${device}"
+  sgdisk --change-name=1:primary --change-name=2:ESP "${device}"
+else
+  # BIOS: GPT with BIOS boot partition (2MiB) and root partition
+  sgdisk --clear "${device}" --new 1::+2MiB "${device}" --new 2::0 --typecode 1:ef02 --typecode 2:8300 "${device}"
+  sgdisk --change-name=1:BIOS-boot --change-name=2:root "${device}"
+fi
+
+# Identify partition names
+if [ "$UEFI" = true ]; then
   part_root="$(ls ${device}* | grep -E "^${device}p?1$")"
   part_boot="$(ls ${device}* | grep -E "^${device}p?2$")"
-}
+else
+  part_bios_boot="$(ls ${device}* | grep -E "^${device}p?1$")"
+  part_root="$(ls ${device}* | grep -E "^${device}p?2$")"
+fi
 
-mkfs.vfat -n "EFI" -F 32 "${part_boot}"
+# Format partitions
+if [ "$UEFI" = true ]; then
+  mkfs.vfat -n "EFI" -F 32 "${part_boot}"
+fi
+
 echo -n "$luks_password" | cryptsetup luksFormat --label archlinux "${part_root}"
 echo -n "$luks_password" | cryptsetup luksOpen "${part_root}" archlinux
 mkfs.btrfs --label archlinux /dev/mapper/archlinux
@@ -159,17 +177,13 @@ btrfs subvolume create /mnt/@var-log
 btrfs subvolume create /mnt/@var-tmp
 umount /mnt
 
-#
-# Great btrfs documentations:
-# https://en.opensuse.org/SDB:BTRFS
-# https://wiki.debian.org/Btrfs
-# https://wiki.archlinux.org/title/btrfs
-# https://github.com/archlinux/archinstall/issues/781
-#
-
 mount_opt="defaults,noatime,nodiratime,compress=zstd,space_cache=v2"
 mount -o subvol=@,$mount_opt /dev/mapper/archlinux /mnt
-mount --mkdir -o umask=0077 "${part_boot}" /mnt/efi
+
+if [ "$UEFI" = true ]; then
+  mount --mkdir -o umask=0077 "${part_boot}" /mnt/efi
+fi
+
 mount --mkdir -o subvol=@home,$mount_opt /dev/mapper/archlinux /mnt/home
 mount --mkdir -o subvol=@swap,$mount_opt /dev/mapper/archlinux /mnt/.swap
 mount --mkdir -o subvol=@snapshots,$mount_opt /dev/mapper/archlinux /mnt/.snapshots
@@ -178,48 +192,35 @@ mount --mkdir -o subvol=@home-snapshots,$mount_opt /dev/mapper/archlinux /mnt/ho
 # Copy-on-Write is no good for big files that are written multiple times.
 # This includes: logs, containers, virtual machines, databases, etc.
 # They usually lie in /var, therefore CoW will be disabled for everything in /var
-# Note that currently btrfs does not support the nodatacow mount option.
 mount --mkdir -o subvol=@var,$mount_opt /dev/mapper/archlinux /mnt/var
 chattr +C /mnt/var # Disable Copy-on-Write for /var
 mount --mkdir -o subvol=@var-log,$mount_opt /dev/mapper/archlinux /mnt/var/log
 mount --mkdir -o subvol=@libvirt,$mount_opt /dev/mapper/archlinux /mnt/var/lib/libvirt
-mount --mkdir -o subvol=@docker,$mount_opt /dev/mapper/archlinux /mnt/var/lib/docker # I feel like using the btrfs storage driver of Docker is not safe yet
-
-# Not worth snapshotting, creating subvolumes for them so that they're not included
-# Be careful not to break a potential future rollback of /@ !!
+mount --mkdir -o subvol=@docker,$mount_opt /dev/mapper/archlinux /mnt/var/lib/docker
 mount --mkdir -o subvol=@cache-pacman-pkgs,$mount_opt /dev/mapper/archlinux /mnt/var/cache/pacman/pkg
 mount --mkdir -o subvol=@var-tmp,$mount_opt /dev/mapper/archlinux /mnt/var/tmp
 
-# Create swapfile for btrfs main system
+# Create swapfile
 btrfs filesystem mkswapfile /mnt/.swap/swapfile
-mkswap /mnt/.swap/swapfile # according to btrfs doc it shouldn't be needed, it's a bug
-swapon /mnt/.swap/swapfile # we use the swap so that genfstab detects it
+mkswap /mnt/.swap/swapfile
+swapon /mnt/.swap/swapfile
 
 # Install all packages listed in packages/regular
 grep -o '^[^ *#]*' packages/regular >regular_packages_to_install
 
 if [[ "$gpu_target" != "None" || "$install_igpu_drivers" = "Yes" ]]; then
   {
-    # Open-source OpenGL drivers
     echo mesa
-
-    # Vulkan Installable Client Driver
     echo vulkan-icd-loader
   } >>regular_packages_to_install
 fi
 
 if [[ "$cpu_target" == "Intel" ]]; then
   echo intel-ucode >>regular_packages_to_install
-
   if [[ "$install_igpu_drivers" == "Yes" ]]; then
     {
-      # HD Graphics series starting from Broadwell (2014) and newer
       echo intel-media-driver
-
-      # GMA 4500 (2008) up to Coffee Lake (2017)
       echo libva-intel-driver
-
-      # Open-source Vulkan driver for Intel GPUs
       echo vulkan-intel
     } >>regular_packages_to_install
   fi
@@ -232,12 +233,9 @@ fi
 
 if [[ "$gpu_target" != "None" ]]; then
   {
-    # GeForce 8 series and newer GPUs up until GeForce GTX 750
-    # VA-API on Radeon HD 2000 and newer GPUs
     echo libva-mesa-driver
-
     if [[ "$gpu_target" = "Nvidia" ]]; then
-      # Install proprietary NVIDIA drivers (from official repos)
+      # Proprietary NVIDIA drivers
       echo nvidia
       echo nvidia-utils
       echo nvidia-settings
@@ -247,51 +245,38 @@ if [[ "$gpu_target" != "None" ]]; then
   } >>regular_packages_to_install
 fi
 
+# Add GRUB if BIOS
+if [ "$UEFI" = false ]; then
+  echo grub >>regular_packages_to_install
+fi
+
 pacstrap -K /mnt - <regular_packages_to_install
 
-# Copy custom files to the new installation
+# Copy custom files
 cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/
 find rootfs -type f -exec bash -c 'file="$1"; dest="/mnt/${file#rootfs/}"; mkdir -p "$(dirname "$dest")"; cp -P "$file" "$dest"' shell {} \;
 
 # Patch pacman config
 sed -i "s/#Color/Color/g" /mnt/etc/pacman.conf
 
-# Patch placeholders from config files
+# Patch placeholders
 sed -i "s/username_placeholder/$user/g" /mnt/etc/systemd/system/getty@tty1.service.d/autologin.conf
 sed -i "s/username_placeholder/$user/g" /mnt/etc/libvirt/qemu.conf
 
-# Set the very fast dash in place of sh
+# Set dash as sh
 ln -sfT dash /mnt/usr/bin/sh
 
+# Kernel command line
 {
-  # Customize Linux Security Modules to include AppArmor
   echo -n "lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
-
-  # Put kernel in integrity lockdown mode
   echo -n " lockdown=integrity"
-
-  # The LUKS device to decrypt
   echo -n " cryptdevice=${part_root}:archlinux"
-
-  # The decrypted device to mount as the root
   echo -n " root=/dev/mapper/archlinux"
-
-  # Mount the @ btrfs subvolume inside the decrypted device as the root
   echo -n " rootflags=subvol=@"
-
-  # Allow suspend state (puts device into sleep but keeps powering the RAM for fast sleep mode recovery)
   echo -n " mem_sleep_default=deep"
-
-  # Ensure that all processes that run before the audit daemon starts are marked as auditable by the kernel
   echo -n " audit=1"
-
-  # Increase default log size
   echo -n " audit_backlog_limit=32768"
-
-  # Completely quiet the boot process to display some eye candy using plymouth instead :)
   echo -n " quiet splash rd.udev.log_level=3"
-
-  # NVIDIA DRM modesetting (required for Wayland and proper performance)
   echo -n " nvidia-drm.modeset=1"
 } >/mnt/etc/kernel/cmdline
 
@@ -306,28 +291,27 @@ arch-chroot /mnt locale-gen
 
 genfstab -U /mnt >>/mnt/etc/fstab
 
-# For a smoother transition between Plymouth and Sway
+# Hush login
 touch /mnt/etc/hushlogins
 sed -i 's/HUSHLOGIN_FILE.*/#\0/g' /etc/login.defs
 
-# Creating user
-arch-chroot /mnt useradd -m -s /bin/sh "$user" # keep a real POSIX shell as default, not zsh, that will come later
+# Create user
+arch-chroot /mnt useradd -m -s /bin/sh "$user"
 for group in wheel audit libvirt firejail; do
   arch-chroot /mnt groupadd -rf "$group"
   arch-chroot /mnt gpasswd -a "$user" "$group"
 done
 echo "$user:$user_password" | arch-chroot /mnt chpasswd
 
-# Create a group that will be able to reach the internet (see docs/PROXY.md)
 arch-chroot /mnt groupadd -rf allow-internet
 
-# Temporarly give sudo NOPASSWD rights to user for yay
+# Temporary sudo for yay
 echo "$user ALL=(ALL) NOPASSWD:ALL" >>"/mnt/etc/sudoers"
 
-# Temporarly disable pacman wrapper so that no warning is issued
-mv /mnt/usr/local/bin/pacman /mnt/usr/local/bin/pacman.disable
+# Temporarily disable pacman wrapper
+mv /mnt/usr/local/bin/pacman /mnt/usr/local/bin/pacman.disable || true
 
-# Install AUR helper
+# Install yay (AUR helper)
 arch-chroot -u "$user" /mnt /bin/bash -c 'mkdir /tmp/yay.$$ && \
                                           cd /tmp/yay.$$ && \
                                           curl "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=yay-bin" -o PKGBUILD && \
@@ -335,9 +319,7 @@ arch-chroot -u "$user" /mnt /bin/bash -c 'mkdir /tmp/yay.$$ && \
 
 # Install AUR packages
 grep -o '^[^ *#]*' packages/aur >aur_packages_to_install
-
-# Remove arch-secure-boot (Secure Boot is not used)
-sed -i '/^arch-secure-boot$/d' aur_packages_to_install
+sed -i '/^arch-secure-boot$/d' aur_packages_to_install   # Remove Secure Boot package
 
 if [[ "$gpu_target" = "Nvidia" ]]; then
   echo nouveau-fw >>aur_packages_to_install
@@ -346,24 +328,18 @@ fi
 HOME="/home/$user" arch-chroot -u "$user" /mnt /usr/bin/yay --noconfirm -Sy - <aur_packages_to_install
 
 # Restore pacman wrapper
-mv /mnt/usr/local/bin/pacman.disable /mnt/usr/local/bin/pacman
+mv /mnt/usr/local/bin/pacman.disable /mnt/usr/local/bin/pacman || true
 
-# Remove sudo NOPASSWD rights from user
+# Remove sudo NOPASSWD
 sed -i '$ d' /mnt/etc/sudoers
 
-# WARNING: using plymouth is not ideal since its code run early at boot
-#          and can be the source of high privilege vulnerabilities.
-#          But hey, security is always a matter of compromise. And I like some
-#          eye candy, so I made my choice :)
-#
-# You can choose your own theme from there: https://github.com/adi1090x/plymouth-themes
+# Plymouth theme
 arch-chroot /mnt plymouth-set-default-theme colorful_loop
 
-# Determine which kernel modules to load early
+# Determine kernel modules for mkinitcpio
 if [[ "$gpu_target" = "AMD" ]]; then
   modules="amdgpu"
 elif [[ "$gpu_target" = "Nvidia" ]]; then
-  # Load all required NVIDIA modules
   modules="nvidia nvidia_modeset nvidia_uvm nvidia_drm"
 elif [[ "$cpu_target" = "Intel" && "$install_igpu_drivers" ]]; then
   modules="i915"
@@ -371,7 +347,6 @@ else
   modules=""
 fi
 
-# Write mkinitcpio.conf (kms hook removed because it conflicts with nvidia-drm)
 cat <<EOF >/mnt/etc/mkinitcpio.conf
 MODULES=($modules)
 BINARIES=(setfont)
@@ -379,45 +354,51 @@ FILES=()
 HOOKS=(base consolefont keymap udev autodetect modconf block plymouth encrypt filesystems keyboard)
 EOF
 
-# Regenerate initramfs
 arch-chroot /mnt mkinitcpio -p linux-hardened
 
-# ==================== SYSTEMD-BOOT SETUP (instead of Secure Boot) ====================
-# Install systemd-boot as the UEFI boot manager
-arch-chroot /mnt bootctl install
-
-# Create a boot entry for linux-hardened
-cmdline=$(cat /mnt/etc/kernel/cmdline)
-
-cat <<EOF >/mnt/boot/loader/entries/arch.conf
+# ==================== BOOTLOADER INSTALLATION ====================
+if [ "$UEFI" = true ]; then
+  # systemd-boot for UEFI
+  arch-chroot /mnt bootctl install
+  cmdline=$(cat /mnt/etc/kernel/cmdline)
+  cat <<EOF >/mnt/boot/loader/entries/arch.conf
 title   Arch Linux
 linux   /vmlinuz-linux-hardened
 initrd  /initramfs-linux-hardened.img
 options $cmdline
 EOF
-
-# Set default loader configuration
-cat <<EOF >/mnt/boot/loader/loader.conf
+  cat <<EOF >/mnt/boot/loader/loader.conf
 default arch.conf
 timeout 3
 console-mode max
 editor no
 EOF
-# =====================================================================================
+else
+  # GRUB for BIOS
+  # Create GRUB default configuration with kernel command line
+  cat <<EOF >/mnt/etc/default/grub
+GRUB_CMDLINE_LINUX_DEFAULT="$(cat /mnt/etc/kernel/cmdline)"
+GRUB_TIMEOUT=3
+GRUB_DISABLE_SUBMENU=y
+EOF
+  arch-chroot /mnt grub-install --target=i386-pc "${device}"
+  arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+fi
+# =================================================================
 
 # Hardening
 arch-chroot /mnt chmod 700 /boot
 arch-chroot /mnt passwd -dl root
 
-# Setup firejail
+# Firejail
 arch-chroot /mnt /usr/bin/firecfg
 echo "$user" >/mnt/etc/firejail/firejail.users
 
-# Setup DNS
+# DNS
 rm -f /mnt/etc/resolv.conf
 arch-chroot /mnt ln -s /usr/lib/systemd/resolv.conf /etc/resolv.conf
 
-# Configure systemd services
+# Enable system services
 arch-chroot /mnt systemctl enable systemd-networkd
 arch-chroot /mnt systemctl enable systemd-resolved
 arch-chroot /mnt systemctl enable systemd-timesyncd
@@ -432,7 +413,7 @@ arch-chroot /mnt systemctl enable apparmor
 arch-chroot /mnt systemctl enable auditd-notify
 arch-chroot /mnt systemctl enable local-forwarding-proxy
 
-# Configure systemd timers
+# Enable timers
 arch-chroot /mnt systemctl enable snapper-timeline.timer
 arch-chroot /mnt systemctl enable snapper-cleanup.timer
 arch-chroot /mnt systemctl enable auditor.timer
@@ -442,14 +423,16 @@ arch-chroot /mnt systemctl enable pacman-sync.timer
 arch-chroot /mnt systemctl enable pacman-notify.timer
 arch-chroot /mnt systemctl enable should-reboot-check.timer
 
-# Configure systemd user services
+# Enable user services
 arch-chroot /mnt systemctl --global enable dbus-broker
 arch-chroot /mnt systemctl --global enable journalctl-notify
 arch-chroot /mnt systemctl --global enable pipewire
 arch-chroot /mnt systemctl --global enable wireplumber
 arch-chroot /mnt systemctl --global enable gammastep
 
-# Run userspace configuration
+# Run user dotfiles setup
 HOME="/home/$user" arch-chroot -u "$user" /mnt /bin/bash -c 'cd && \
-                                                             git clone https://github.com/dagyepong/arch_dots.git && \
-                                                             .install.sh'
+                                                             git clone https://github.com/ShellCode33/.dotfiles && \
+                                                             .dotfiles/install.sh'
+
+echo "Installation complete. You can now reboot."
